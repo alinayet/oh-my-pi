@@ -1095,6 +1095,19 @@ export const cfgStartupShowSplash = register({
 	},
 });
 
+export const cfgStartupSplashArt = register({
+	id: "startup.splashArt",
+	type: "string",
+	default: "",
+	ui: {
+		tab: "interaction",
+		group: "Startup & Updates",
+		label: "Splash Art",
+		description:
+			"Path to a UTF-8 text file whose content replaces the built-in welcome logo (custom art supported, empty = built-in π logo)",
+	},
+});
+
 export const cfgStartupSetupWizard = register({
 	id: "startup.setupWizard",
 	type: "boolean",

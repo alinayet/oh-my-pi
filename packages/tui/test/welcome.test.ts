@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { pickWeightedTip, WelcomeComponent } from "@oh-my-pi/pi-tui/prompt/welcome";
+import { getSplashArtOverride, setSplashArtOverride } from "@oh-my-pi/pi-tui/prompt/splash-art";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import { visibleWidth } from "@oh-my-pi/pi-tui";
 
@@ -12,7 +13,7 @@ describe("WelcomeComponent", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("natively sets the version under the wordmark beside the logo", () => {
+	it("natively sets the version under the logo", () => {
 		const tree = new WelcomeComponent("18.4.12").describe({} as never);
 		expect(tree.c?.[0]).toMatchObject({
 			key: "lockup",
@@ -22,10 +23,7 @@ describe("WelcomeComponent", () => {
 				{
 					k: "col",
 					p: { role: "omp.welcome.mark" },
-					c: [
-						{ p: { role: "omp.welcome.wordmark" } },
-						{ p: { role: "omp.welcome.version", spans: [{ t: "v18.4.12" }] } },
-					],
+					c: [{ p: { role: "omp.welcome.version", spans: [{ t: "v18.4.12" }] } }],
 				},
 			],
 		});
@@ -86,10 +84,9 @@ describe("WelcomeComponent", () => {
 		const indent = (row: string) => visibleWidth(row) - visibleWidth(row.trimStart());
 		const expectCentered = (left: number, right: number) => expect(Math.abs(left - right)).toBeLessThanOrEqual(1);
 
-		// The lockup is one block: the logo's bar starts it, the wordmark row ends it.
+		// The banner is one centered block: the logo's bar defines its widest line.
 		const bar = rows.find(row => row.includes("████████████")) ?? "";
-		const word = rows.find(row => row.includes("▄▀▀▄")) ?? "";
-		expectCentered(indent(bar), columns - visibleWidth(word));
+		expectCentered(indent(bar), columns - visibleWidth(bar));
 
 		// Each tip line centers on its own.
 		const below = rows.slice(rows.findIndex(row => row.includes("Tip: "))).filter(row => row.length > 0);
@@ -104,19 +101,34 @@ describe("WelcomeComponent", () => {
 		expect(text(49)).toContain("v1.0.0");
 	});
 
-	it("sets the version under the wordmark while the lockup fits, else keeps the logo alone", () => {
+	it("renders the logo with the version under it and drops nothing above 4 columns", () => {
 		const rows = (columns: number) => new WelcomeComponent("1.0.0").render(columns).map(row => Bun.stripANSI(row));
 
-		// The lockup needs 12 logo + 4 gap + 15 wordmark columns inside the 2-column margin.
 		const fits = rows(33);
-		const word = fits.find(row => row.includes("▄▀▀▄"));
-		const version = fits.find(row => row.includes("v1.0.0"));
 		expect(fits.some(row => row.includes("████████████"))).toBe(true);
-		expect(version?.indexOf("v1.0.0")).toBe(word?.indexOf("▄▀▀▄"));
+		expect(fits.some(row => row.includes("v1.0.0"))).toBe(true);
+		expect(fits.some(row => row.includes("▄▀▀▄"))).toBe(false);
 
 		const narrow = rows(32).join("\n");
 		expect(narrow).toContain("████████████");
 		expect(narrow).not.toContain("▄▀▀▄");
-		expect(narrow).not.toContain("v1.0.0");
+	});
+
+	it("renders host-provided splash art in place of the built-in logo", () => {
+		const previous = getSplashArtOverride();
+		try {
+			setSplashArtOverride("~ ~ ~\n~ CUST ~\n~ ~ ~");
+			const rows = new WelcomeComponent("1.0.0").render(60).map(row => Bun.stripANSI(row).trimEnd());
+			expect(rows.some(row => row.includes("CUST"))).toBe(true);
+			expect(rows.some(row => row.includes("████████████"))).toBe(false);
+			expect(rows.some(row => row.includes("v1.0.0"))).toBe(true);
+			// The override re-renders cached lines when it changes.
+			setSplashArtOverride(" SWAPPED ");
+			const second = new WelcomeComponent("1.0.0").render(60).map(row => Bun.stripANSI(row).trimEnd());
+			expect(second.join("\n")).toContain("SWAPPED");
+			expect(second.join("\n")).not.toContain("CUST");
+		} finally {
+			setSplashArtOverride(previous);
+		}
 	});
 });

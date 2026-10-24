@@ -3,6 +3,7 @@
  * Handles TUI rendering and user interaction, delegating business logic to AgentSession.
  */
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import {
 	type Agent,
@@ -309,6 +310,7 @@ import type { LoopConditionConfig, LoopLimitRuntime } from "@oh-my-pi/pi-tui/sta
 import { OAuthManualInputManager } from "./oauth-manual-input";
 import { formatPersistenceNotice } from "./persistence-failure";
 import { resolveComposerHint } from "@oh-my-pi/pi-tui/prompt/composer-hints";
+import { setSplashArtOverride } from "@oh-my-pi/pi-tui/prompt/splash-art";
 import { hintUsage } from "../utils/usage-counter";
 import {
 	getRunningSubagentBadgeAgentIds,
@@ -377,6 +379,7 @@ import {
 	cfgSpellingTypoDetection,
 	cfgStartupChangelogMode,
 	cfgStartupQuiet,
+	cfgStartupSplashArt,
 	cfgStatusLineCompactThinkingLevel,
 	cfgStatusLineContextLine,
 	cfgStatusLineLeftSegments,
@@ -433,6 +436,7 @@ import {
  */
 const cfgLiveUiSettings = combine({
 	showHardwareCursor: cfgShowHardwareCursor,
+	"startup.splashArt": cfgStartupSplashArt,
 	"tui.maxInlineImages": cfgTuiMaxInlineImages,
 	"tui.resizeScrollback": cfgTuiResizeScrollback,
 	"tui.completeScrollback": cfgTuiCompleteScrollback,
@@ -1948,6 +1952,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		setTuiTight(cfgTuiTight.get(settings));
+		this.#applySplashArtSetting();
 		setMarkdownMermaidRendering(cfgTuiRenderMermaid.get(settings));
 		setSvgFigureRendering(cfgTuiRenderSvg.get(settings));
 		this.#applyAutoGraphSetting();
@@ -3640,6 +3645,27 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/** Charts under assistant tables per `tui.autoGraph`; `smart` picks multi-series charts through the session's judge. */
+	/** Load `startup.splashArt` (a path to UTF-8 text, `~` allowed) and hand it
+	 *  to the TUI welcome banner. Missing/unreadable files fall back to the
+	 *  built-in brand mark; changes re-render on the next frame. */
+	#applySplashArtSetting(): void {
+		const configured = cfgStartupSplashArt.get(this.settings).trim();
+		if (configured === "") {
+			setSplashArtOverride(null);
+			return;
+		}
+		const expanded = configured.startsWith("~" + path.sep)
+			? path.join(os.homedir(), configured.slice(2))
+			: configured;
+		Bun.file(expanded)
+			.text()
+			.then(art => setSplashArtOverride(art))
+			.catch(error => {
+				logger.warn("startup.splashArt could not be loaded", { path: expanded, error: String(error) });
+				setSplashArtOverride(null);
+			});
+	}
+
 	#applyAutoGraphSetting(): void {
 		const mode = cfgTuiAutoGraph.get(this.settings);
 		setTableCharts(
@@ -3784,6 +3810,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (any("tui.hyperlinks")) {
 			// The tui.hyperlinks effect already re-applied the flag; repaint cached rows.
 			this.statusLine.invalidate();
+			this.ui.invalidate();
+			this.ui.requestRender();
+		}
+		if (any("startup.splashArt")) {
+			this.#applySplashArtSetting();
 			this.ui.invalidate();
 			this.ui.requestRender();
 		}

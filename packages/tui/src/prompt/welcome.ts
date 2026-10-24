@@ -12,6 +12,7 @@ import { TERMINAL } from "../terminal-capabilities";
 import { theme } from "../theme/theme";
 import type { Component } from "../tui";
 import { padding, replaceTabs, visibleWidth, wrapTextWithAnsi } from "../utils";
+import { getSplashArtOverride, splashArtVersion } from "./splash-art";
 import tipsText from "./tips.txt" with { type: "text" };
 
 /** Leading marker for a tip that pitches Tern: shown only while no TSP surface
@@ -189,10 +190,10 @@ export function renderWelcomeTip(tip: string, width: number, phase = 0): string[
 }
 
 /**
- * The session's welcome banner. In a terminal: the gradient logo beside the
- * `omp` wordmark with the version under it (the logo alone when the lockup does
- * not fit) and the tip of the session (dropped below {@link TIP_MIN_COLUMNS}
- * columns). Natively: a card with the same logo, wordmark, version and tip
+ * The session's welcome banner. In a terminal: the gradient logo with the
+ * version under it, optionally replaced by host-provided splash art
+ * (`startup.splashArt`), and the tip of the session (dropped below {@link TIP_MIN_COLUMNS}
+ * columns). Natively: a card with the same logo, version and tip
  * ({@link WelcomeComponent.describe}).
  */
 export class WelcomeComponent implements Component {
@@ -210,6 +211,7 @@ export class WelcomeComponent implements Component {
 	// returning a stable array reference keeps the whole frame prefix stable.
 	// Bypassed while the intro animation runs (every frame differs).
 	#cachedWidth = -1;
+	#cachedArtVersion = -1;
 	#cachedLines: string[] | undefined;
 	#native: { tip: string | undefined; node: NativeNode } | undefined;
 
@@ -232,7 +234,7 @@ export class WelcomeComponent implements Component {
 	/**
 	 * A `card` (`omp.welcome`) mirroring the terminal banner: the lockup
 	 * (`omp.welcome.lockup`: the terminal's builtin `omp` mark, which it animates,
-	 * beside the wordmark with the version under it) and the tip of the session.
+	 * with the version under it) and the tip of the session.
 	 * Roles carry the look (gradient logo, type scale); a "[NEW]" tip
 	 * carries a terminal-clocked shimmering tag.
 	 */
@@ -257,13 +259,9 @@ export class WelcomeComponent implements Component {
 						"logo",
 					),
 					keyed(
-						col(
-							[
-								art([span(APP_NAME, "strong")], "omp.welcome.wordmark"),
-								art([span(`v${this.version}`, "dim mono")], "omp.welcome.version"),
-							],
-							{ role: "omp.welcome.mark" },
-						),
+						col([art([span(`v${this.version}`, "dim mono")], "omp.welcome.version")], {
+							role: "omp.welcome.mark",
+						}),
 						"mark",
 					),
 				],
@@ -282,7 +280,7 @@ export class WelcomeComponent implements Component {
 			if (isNew) tipRow.push(node("shimmer", { text: "New", role: "omp.welcome.new" }));
 			body.push(node("row", { gap: "sm", align: "start", role: "omp.welcome.tip" }, tipRow, "tip"));
 		}
-		// No head row or chevron: the card is the hero; the version sits under the wordmark.
+		// No head row or chevron: the card is the hero; the version sits beside the logo.
 		const described = card({ role: "omp.welcome" }, body);
 		this.#native = { tip, node: described };
 		return described;
@@ -356,7 +354,8 @@ export class WelcomeComponent implements Component {
 
 	render(termWidth: number): readonly string[] {
 		const animating = this.#animStart != null;
-		if (!animating && this.#cachedLines && this.#cachedWidth === termWidth) {
+		const artVersion = splashArtVersion();
+		if (!animating && this.#cachedLines && this.#cachedWidth === termWidth && this.#cachedArtVersion === artVersion) {
 			return this.#cachedLines;
 		}
 		const lines = this.#renderLines(termWidth);
@@ -366,6 +365,7 @@ export class WelcomeComponent implements Component {
 		} else {
 			this.#cachedLines = lines;
 			this.#cachedWidth = termWidth;
+			this.#cachedArtVersion = artVersion;
 		}
 		return lines;
 	}
@@ -374,10 +374,8 @@ export class WelcomeComponent implements Component {
 		// Content keeps a column clear on each side; everything centers in the full width.
 		const room = termWidth - 2;
 		if (room < 4) return [];
-		const logo = this.#currentLogoFrame();
 		const version = theme.fg("dim", `v${this.version}`);
-		const lockupWidth = LOGO_WIDTH + LOCKUP_GAP + Math.max(WORDMARK_WIDTH, visibleWidth(version));
-		const art = room >= lockupWidth ? lockup(logo, version) : room >= LOGO_WIDTH ? logo : [];
+		const art = [...this.#currentLogoFrame(), version];
 		const lines = centerBlock(art, termWidth);
 		const tip = termWidth >= TIP_MIN_COLUMNS ? this.#renderTip(room) : [];
 		if (tip.length > 0) lines.push("", ...tip.flatMap(line => centerBlock([line], termWidth)));
@@ -401,42 +399,41 @@ export class WelcomeComponent implements Component {
 
 	/** Pick the logo frame for the current intro phase, or the resting frame. */
 	#currentLogoFrame(): readonly string[] {
+		const custom = getSplashArtOverride();
+		if (custom !== null) return this.#customArtFrame(custom);
 		if (this.#animStart == null) return REST_FRAME;
 		const elapsed = performance.now() - this.#animStart;
 		if (elapsed >= INTRO_MS) return REST_FRAME;
 		return introLogoFrame(elapsed / INTRO_MS);
+	}
+
+	/**
+	 * Host-provided splash art (`startup.splashArt`) painted with the same
+	 * multi-stop gradient and intro sweep as the built-in brand mark. Default
+	 * (custom === null) falls back to {@link PI_LOGO}.
+	 */
+	#customArtFrame(custom: string): readonly string[] {
+		const customLines = custom.split("\n");
+		if (this.#animStart == null) return gradientLogo(customLines, 0);
+		const elapsed = performance.now() - this.#animStart;
+		if (elapsed >= INTRO_MS) return gradientLogo(customLines, 0);
+		const progress = elapsed / INTRO_MS;
+		const eased = 1 - (1 - progress) ** 3;
+		const phase = ((((1 - eased) * INTRO_SWEEPS) % 1) + 1) % 1;
+		const shinePos = (((progress * INTRO_SHINE_TRAVERSALS) % 1) + 1) % 1;
+		const shineStrength = (1 - eased) ** 1.5;
+		return gradientLogo(customLines, phase, { strength: shineStrength, pos: shinePos });
 	}
 }
 
 /** Block-grid brand mark shared by the welcome and setup surfaces. */
 export const PI_LOGO = ["████████████", "   ██  ██   ", "   ██  ██   ", "   ▒▒  ██   ", "       ██   "];
 
-/** Columns of {@link PI_LOGO}. */
-const LOGO_WIDTH = Math.max(...PI_LOGO.map(row => row.length));
-
-/**
- * The `omp` wordmark in half-blocks, set beside {@link PI_LOGO} from its second
- * row: the `p` descends into the fourth, the version takes the fifth.
- */
-const WORDMARK = ["▄▀▀▄ █▀▄▀▄ █▀▀▄", "▀▄▄▀ █ █ █ █▄▄▀", "           █"];
-
-/** Columns of {@link WORDMARK}. */
-const WORDMARK_WIDTH = Math.max(...WORDMARK.map(row => row.length));
-
-/** Columns between the logo and the wordmark. */
-const LOCKUP_GAP = 4;
-
 /** Widest a welcome tip wraps, so a long one stays a centered paragraph. */
 const TIP_MEASURE = 72;
 
 /** Narrowest terminal that still shows the tip; below it the banner is the logo alone. */
 const TIP_MIN_COLUMNS = 50;
-
-/** Logo frame `logo` with the wordmark beside it and `version` (styled) under the wordmark. */
-function lockup(logo: readonly string[], version: string): string[] {
-	const beside = ["", ...WORDMARK.map(row => theme.bold(theme.fg("text", row))), version];
-	return logo.map((row, index) => `${row}${padding(LOCKUP_GAP)}${beside[index] ?? ""}`);
-}
 
 /**
  * `lines` indented as one block whose widest line is centered in `width`

@@ -1,0 +1,98 @@
+# Upstream sync + custom splash rebuild: keeps this fork's branding on top of
+# every official oh-my-pi release. Runs on the `custom-splash` branch.
+name: Custom splash release
+
+on:
+  schedule:
+    - cron: "23 6 * * *" # daily, off-peak
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Upstream ref to sync (tag or main)"
+        default: "main"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Sync upstream & publish fork release
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      BUN_VERSION: "1.3.0"
+    steps:
+      - name: Checkout fork (custom-splash branch)
+        uses: actions/checkout@v4
+        with:
+          ref: custom-splash
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "omp-splash-bot"
+          git config user.email "actions@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/can1357/oh-my-pi.git
+          git fetch upstream main --tags --no-tags --prune
+
+      - name: Resolve upstream ref
+        id: upstream
+        run: |
+          ref="${{ github.event.inputs.ref }}"
+          if [ -z "$ref" ] || [ "$ref" = "main" ]; then
+            ref=$(git describe --tag --abbrev=0 upstream/main 2>/dev/null || echo upstream/main)
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Merge upstream into custom-splash
+        run: |
+          git merge --no-edit ${{ steps.upstream.outputs.ref }} || {
+            echo "::error::Merge conflict with custom splash patches - manual fix needed"
+            exit 1
+          }
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Fetch prebuilt native addons
+        run: |
+          version=$(node -p "require('./packages/natives/package.json').version")
+          cd /tmp
+          npm pack @oh-my-pi/pi-natives-linux-x64@$version --pack-destination /tmp
+          tar xzf oh-my-pi-pi-natives-linux-x64-$version.tgz
+          cp package/*.node "$GITHUB_WORKSPACE/packages/natives/native/"
+
+      - name: Typecheck touched packages
+        run: |
+          bun --cwd=packages/tui run check
+          bun --cwd=packages/coding-agent run check
+
+      - name: Build linux-x64 binary
+        run: bun --cwd=packages/coding-agent scripts/build-binary.ts
+
+      - name: Push merged customization branch
+        if: ${{ github.event_name != 'pull_request' }}
+        run: git push origin custom-splash
+
+      - name: Read version
+        id: version
+        run: echo "version=$(node -p "require('./packages/coding-agent/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release on this fork
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="custom-v${{ steps.version.outputs.version }}"
+          exists=$(gh release list --repo "$GITHUB_REPOSITORY" --json tagName --limit 100 --jq ".[].tagName" | grep -c "^$tag\$" || true)
+          if [ "$exists" != "0" ]; then
+            gh release delete "$tag" --yes --cleanup-tag || true
+          fi
+          gh release create "$tag" packages/coding-agent/dist/omp \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "omp (custom splash) v${{ steps.version.outputs.version }}" \
+            --notes "Rebuilt from upstream ${{ steps.upstream.outputs.ref }}: no 'omp' wordmark; customizable splash art via startup.splashArt in ~/.omp/agent/config.yml"
