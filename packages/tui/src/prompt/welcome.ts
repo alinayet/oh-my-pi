@@ -12,7 +12,7 @@ import { TERMINAL } from "../terminal-capabilities";
 import { theme } from "../theme/theme";
 import type { Component } from "../tui";
 import { padding, replaceTabs, visibleWidth, wrapTextWithAnsi } from "../utils";
-import { getSplashArtOverride, splashArtVersion } from "./splash-art";
+import { getSplashArt, type SplashArt, splashArtVersion } from "./splash-art";
 import tipsText from "./tips.txt" with { type: "text" };
 
 /** Leading marker for a tip that pitches Tern: shown only while no TSP surface
@@ -399,7 +399,7 @@ export class WelcomeComponent implements Component {
 
 	/** Pick the logo frame for the current intro phase, or the resting frame. */
 	#currentLogoFrame(): readonly string[] {
-		const custom = getSplashArtOverride();
+		const custom = getSplashArt();
 		if (custom !== null) return this.#customArtFrame(custom);
 		if (this.#animStart == null) return REST_FRAME;
 		const elapsed = performance.now() - this.#animStart;
@@ -408,21 +408,26 @@ export class WelcomeComponent implements Component {
 	}
 
 	/**
-	 * Host-provided splash art (`startup.splashArt`) painted with the same
-	 * multi-stop gradient and intro sweep as the built-in brand mark. Default
-	 * (custom === null) falls back to {@link PI_LOGO}.
+	 * Host-provided splash art (`startup.splashArt`): painted with the file's
+	 * own gradient stops (or a flat accent color with `# gradient: none`), and
+	 * animated with the built-in intro sweep only unless the file opted out
+	 * with `# animate: false`. Falls back to {@link PI_LOGO} when unset.
 	 */
-	#customArtFrame(custom: string): readonly string[] {
-		const customLines = custom.split("\n");
-		if (this.#animStart == null) return gradientLogo(customLines, 0);
+	#customArtFrame(custom: SplashArt): readonly string[] {
+		const customLines = custom.lines;
+		if (custom.stops === null) return customLines.map(line => theme.fg("accent", line));
+		const paint = (phase: number, shine?: ShineConfig) =>
+			gradientLogoStops(customLines, custom.stops ?? [], phase, shine);
+		if (!custom.animate) return paint(0);
+		if (this.#animStart == null) return paint(0);
 		const elapsed = performance.now() - this.#animStart;
-		if (elapsed >= INTRO_MS) return gradientLogo(customLines, 0);
+		if (elapsed >= INTRO_MS) return paint(0);
 		const progress = elapsed / INTRO_MS;
 		const eased = 1 - (1 - progress) ** 3;
 		const phase = ((((1 - eased) * INTRO_SWEEPS) % 1) + 1) % 1;
 		const shinePos = (((progress * INTRO_SHINE_TRAVERSALS) % 1) + 1) % 1;
 		const shineStrength = (1 - eased) ** 1.5;
-		return gradientLogo(customLines, phase, { strength: shineStrength, pos: shinePos });
+		return paint(phase, { strength: shineStrength, pos: shinePos });
 	}
 }
 
@@ -518,6 +523,64 @@ export function gradientEscape(t: number, shine?: ShineConfig): string {
 		if (intensity > 0.5) idx = ramp.length - 1;
 	}
 	return `\x1b[38;5;${ramp[idx]}m`;
+}
+
+/**
+ * {@link gradientLogo} generalized to a caller-provided stop list; shares the
+ * escape builder's palette math so custom splash art matches the built-in
+ * brand mark exactly.
+ */
+export function gradientLogoStops(
+	lines: readonly string[],
+	stops: readonly (readonly [number, number, number])[],
+	phase = 0,
+	shine?: ShineConfig,
+): string[] {
+	const reset = "[0m";
+	const rows = lines.length;
+	const cols = Math.max(...lines.map(l => l.length));
+	const xSpan = Math.max(1, cols - 1);
+	const ySpan = Math.max(1, rows - 1);
+	const normalizedPhase = ((phase % 1) + 1) % 1;
+	const segments = Math.max(1, stops.length - 1);
+	const shineStrength = shine && shine.strength > 0 ? shine.strength : 0;
+	const shinePos = shine ? shine.pos : 0;
+	return lines.map((line, y) => {
+		let result = "";
+		for (let x = 0; x < line.length; x++) {
+			const char = line[x];
+			if (char === " ") {
+				result += char;
+				continue;
+			}
+			const base = (x / xSpan + y / ySpan) / 2;
+			const t = normalizedPhase === 0 ? base : (base + normalizedPhase) % 1;
+			const seg = t * segments;
+			const i = Math.min(segments - 1, Math.floor(seg));
+			const f = seg - i;
+			const a = stops[i] ?? stops[stops.length - 1] ?? [147, 98, 244];
+			const b = stops[i + 1] ?? stops[stops.length - 1] ?? a;
+			let r = a[0] + (b[0] - a[0]) * f;
+			let g = a[1] + (b[1] - a[1]) * f;
+			let bl = a[2] + (b[2] - a[2]) * f;
+			if (shineStrength > 0) {
+				const dist = Math.abs(t - shinePos);
+				const intensity = Math.max(0, 1 - dist / SHINE_HALF_WIDTH) * shineStrength;
+				if (intensity > 0) {
+					r += (255 - r) * intensity;
+					g += (255 - g) * intensity;
+					bl += (255 - bl) * intensity;
+				}
+			}
+			result +=
+				(TERMINAL.trueColor
+					? `\x1b[38;2;${Math.round(r)};${Math.round(g)};${Math.round(bl)}m`
+					: `\x1b[38;5;${GRADIENT_RAMP_256[Math.min(GRADIENT_RAMP_256.length - 1, Math.floor(t * (GRADIENT_RAMP_256.length - 1) + 0.5))]}m`) +
+				char +
+				reset;
+		}
+		return result;
+	});
 }
 
 /**
