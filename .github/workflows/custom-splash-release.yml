@@ -88,10 +88,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag="custom-v${{ steps.version.outputs.version }}"
-          exists=$(gh release list --repo "$GITHUB_REPOSITORY" --json tagName --limit 100 --jq ".[].tagName" | grep -c "^$tag\$" || true)
-          if [ "$exists" != "0" ]; then
-            gh release delete "$tag" --yes --cleanup-tag || true
-          fi
+          git push origin --delete "refs/tags/$tag" >/dev/null 2>&1 || true
+          gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag >/dev/null 2>&1 || true
+          sleep 2
+          git fetch --tags --force origin >/dev/null 2>&1 || true
           gh release create "$tag" packages/coding-agent/dist/omp \
             --repo "$GITHUB_REPOSITORY" \
             --title "omp (custom splash) v${{ steps.version.outputs.version }}" \
